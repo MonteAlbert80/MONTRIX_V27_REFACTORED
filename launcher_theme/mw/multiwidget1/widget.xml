@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<widget><state>
+ <background left="0" top="0" width="100" height="100" color="#10151A" alpha="170" />
+ <image left="0" top="0" width="100" height="82" file="family_3gen_16x9.jpg" />
+ <text left="4" top="84" width="92" height="12" title="Three Generations" size="6" color="#FFFFFF" halign="left" showlabel="true" />
+</state></widget>
