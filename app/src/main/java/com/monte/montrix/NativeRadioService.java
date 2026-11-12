@@ -9,16 +9,21 @@ public class NativeRadioService extends Service implements SyuRadioClient.Listen
  private static final String[] DEMO_FREQ={"98.9 FM","101.5 FM","93.3 FM","90.5 FM"};
  private static final String[] DEMO_PS={"KUTX","KROX","KGSR","KUT"};
  private static final String[] DEMO_RT={"Live radio — V9 simulator","Demo station — next/previous now behave as radio tuning","RadioText can be long and CWG can marquee it","News and information"};
+ private com.monte.montrix.radio.backend.EmulatorSdrBackend emulatorBackend;
+ private boolean emulatorMode(){return android.os.Build.FINGERPRINT.contains("generic") || android.os.Build.HARDWARE.contains("ranchu") || android.os.Build.HARDWARE.contains("goldfish");}
  private final NativeRdsReader nativeRds=new NativeRdsReader();
+ private final RdsStateGate rdsGate=new RdsStateGate();
   private final java.util.concurrent.ExecutorService rdsExecutor=java.util.concurrent.Executors.newSingleThreadExecutor();
   private final Runnable rdsTick=new Runnable(){@Override public void run(){
     if(radio && isRealFyt() && !rdsExecutor.isShutdown()) {
       rdsExecutor.execute(()->{
+        final long epoch=rdsGate.epoch();
         final String p=nativeRds.ps(),r=nativeRds.rt();
         if(p!=null || r!=null) mainHandler.post(()->{
-          if(!radio)return;
-          if(p!=null && !p.equals(ps)){ps=p; Log.i("ASURE_RDS","PS_CHANGED "+p);}
-          if(r!=null && !r.equals(rt)){rt=r; Log.i("ASURE_RDS","RT_CHANGED "+r);}
+          if(!radio || epoch!=rdsGate.epoch())return;
+          if(p!=null)rdsGate.acceptPs(p,"sqlfmservice:27");
+          if(r!=null)rdsGate.acceptRt(r,"sqlfmservice:28");
+          ps=rdsGate.ps(); rt=rdsGate.rt();
           getSharedPreferences("radio_cache",0).edit().putString("ps",ps).putString("rt",rt).apply();
           if(r!=null)Log.i("ASURE_RDS","RT_RECEIVED length="+r.length());
           publish();
@@ -30,6 +35,7 @@ public class NativeRadioService extends Service implements SyuRadioClient.Listen
   private int pendingSeekFromKhz=0; private String pendingSeekDirection=""; private boolean liveFrequencyReceived=false; private int tuneTargetKhz=0,tuneAttempts=0; private long lastTuneCommandMs=0; private String tuneStatus="";
  private static int parseKhz(String value){if(value==null)return 0;java.util.regex.Matcher m=java.util.regex.Pattern.compile("(\\d{2,3}\\.\\d)").matcher(value);if(!m.find())return 0;try{return Math.round(Float.parseFloat(m.group(1))*1000f);}catch(Exception e){return 0;}}
  private void startPresetTune(int target){
+  if(emulatorMode()){radio=true;if(emulatorBackend!=null)emulatorBackend.tune(target);else tuneStatus="SDR backend unavailable";return;}
   if(target<87500||target>108000||target%200!=100){Log.w("ASURE_QA","TUNE_REJECTED invalid_frequency="+target);return;}
   if(syu==null||!syu.connected()){tuneStatus="Tuner unavailable";Log.w("ASURE_QA","TUNE_FAILED toolkit_not_connected");publish();return;}
   tuneTargetKhz=target;
@@ -56,13 +62,13 @@ public class NativeRadioService extends Service implements SyuRadioClient.Listen
   session=new MediaSession(this,"FYT Radio"); session.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS|MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS);
   session.setCallback(new MediaSession.Callback(){
    @Override public boolean onMediaButtonEvent(Intent i){return super.onMediaButtonEvent(i);}
-   @Override public void onPlay(){radio=true;session.setActive(true);rt="Live radio";publish();}
+   @Override public void onPlay(){radio=true;session.setActive(true);publish();}
    @Override public void onPause(){Log.i("ASURE_QA","Radio pause ignored");}
-   @Override public void onSkipToNext(){if(isRealFyt())if(syu==null||!syu.seekNext())radioCommand("com.syu.radio.nextservice");else{testStep=(testStep+1)%DEMO_FREQ.length;freq=DEMO_FREQ[testStep];ps=DEMO_PS[testStep];rt=DEMO_RT[testStep];publish();}}
-   @Override public void onSkipToPrevious(){if(isRealFyt())if(syu==null||!syu.seekPrevious())radioCommand("com.syu.radio.prevservice");else{testStep=(testStep-1+DEMO_FREQ.length)%DEMO_FREQ.length;freq=DEMO_FREQ[testStep];ps=DEMO_PS[testStep];rt=DEMO_RT[testStep];publish();}}
+   @Override public void onSkipToNext(){if(isRealFyt()){if(syu==null||!syu.seekNext())Log.w("SYU_RADIO","OEM-disabled: media next not dispatched");}else{testStep=(testStep+1)%DEMO_FREQ.length;freq=DEMO_FREQ[testStep];ps=DEMO_PS[testStep];rt=DEMO_RT[testStep];publish();}}
+   @Override public void onSkipToPrevious(){if(isRealFyt()){if(syu==null||!syu.seekPrevious())Log.w("SYU_RADIO","OEM-disabled: media previous not dispatched");}else{testStep=(testStep-1+DEMO_FREQ.length)%DEMO_FREQ.length;freq=DEMO_FREQ[testStep];ps=DEMO_PS[testStep];rt=DEMO_RT[testStep];publish();}}
    @Override public void onStop(){setState(PlaybackState.STATE_STOPPED);}
   });
-  syu=new SyuRadioClient(this,this);syu.start();startForeground(61,note("Ready"));
+  if(emulatorMode()){emulatorBackend=new com.monte.montrix.radio.backend.EmulatorSdrBackend((f,p,r,status)->{if(f!=null)onRadio(f,p,r);if(status!=null&&!status.isEmpty()){tuneStatus=status;publish();}});emulatorBackend.start();}else{syu=new SyuRadioClient(this,this);syu.start();}startForeground(61,note("Ready"));
   DiagnosticLogger.event(this,"SERVICE_CREATE","version=26.16.0-direct-preset-candidate");
   android.content.IntentFilter filter=new android.content.IntentFilter();
   for(String action:new String[]{Intent.ACTION_SCREEN_ON,Intent.ACTION_SCREEN_OFF,Intent.ACTION_POWER_CONNECTED,Intent.ACTION_POWER_DISCONNECTED,Intent.ACTION_SHUTDOWN,Intent.ACTION_TIME_CHANGED,AudioManager.ACTION_AUDIO_BECOMING_NOISY})filter.addAction(action);
@@ -71,8 +77,10 @@ public class NativeRadioService extends Service implements SyuRadioClient.Listen
  }
  @Override public int onStartCommand(Intent i,int flags,int id){String a=i==null?ACTION_RADIO:i.getAction();
   DiagnosticLogger.event(this,"SERVICE_COMMAND","action="+a+" flags="+flags+" id="+id);if(ACTION_MUSIC.equals(a)) selectMusic();
-  else if(ACTION_RADIO_PREV.equals(a)){tuneTargetKhz=0;radio=true;int before=parseKhz(freq);boolean ok=syu!=null&&syu.seekPrevious();Log.i("ASURE_QA","SEEK_PREVIOUS dispatched="+ok+" before="+before);DiagnosticLogger.event(this,"TUNER_SEEK","direction=previous dispatched="+ok+" before="+before);if(ok)verifySeekChange(before,"previous");else radioCommand("com.syu.radio.prevservice");}
-  else if(ACTION_RADIO_NEXT.equals(a)){tuneTargetKhz=0;radio=true;int before=parseKhz(freq);boolean ok=syu!=null&&syu.seekNext();Log.i("ASURE_QA","SEEK_NEXT dispatched="+ok+" before="+before);DiagnosticLogger.event(this,"TUNER_SEEK","direction=next dispatched="+ok+" before="+before);if(ok)verifySeekChange(before,"next");else radioCommand("com.syu.radio.nextservice");}
+  else if(ACTION_RADIO_PREV.equals(a) && emulatorMode()){radio=true;if(emulatorBackend!=null)emulatorBackend.seek(false);}
+  else if(ACTION_RADIO_NEXT.equals(a) && emulatorMode()){radio=true;if(emulatorBackend!=null)emulatorBackend.seek(true);}
+  else if(ACTION_RADIO_PREV.equals(a)){tuneTargetKhz=0;radio=true;int before=parseKhz(freq);boolean ok=syu!=null&&syu.seekPrevious();Log.i("ASURE_QA","SEEK_PREVIOUS dispatched="+ok+" before="+before);DiagnosticLogger.event(this,"TUNER_SEEK","direction=previous dispatched="+ok+" before="+before);if(ok)verifySeekChange(before,"previous");else Log.w("SYU_RADIO","OEM-disabled: seek previous fallback suppressed");}
+  else if(ACTION_RADIO_NEXT.equals(a)){tuneTargetKhz=0;radio=true;int before=parseKhz(freq);boolean ok=syu!=null&&syu.seekNext();Log.i("ASURE_QA","SEEK_NEXT dispatched="+ok+" before="+before);DiagnosticLogger.event(this,"TUNER_SEEK","direction=next dispatched="+ok+" before="+before);if(ok)verifySeekChange(before,"next");else Log.w("SYU_RADIO","OEM-disabled: seek next fallback suppressed");}
   else if(ACTION_TUNE.equals(a)){radio=true;int khz=i.getIntExtra("frequency_khz",0);DiagnosticLogger.event(this,"TUNER_TUNE_REQUEST","khz="+khz+" connected="+(syu!=null&&syu.connected()));startPresetTune(khz);}
   else if(ACTION_RADIO_TOGGLE.equals(a)){Log.i("ASURE_QA","IGNORED_RADIO_TOGGLE: radio has no play/pause control");}
   else {if(ACTION_TEST.equals(a)&&!isRealFyt()){testStep=0;freq=DEMO_FREQ[0];ps=DEMO_PS[0];rt=DEMO_RT[0];}selectRadio();}
@@ -88,8 +96,9 @@ public class NativeRadioService extends Service implements SyuRadioClient.Listen
   // Do not send a global MEDIA_PAUSE: on FYT this can pause the OEM radio or music app unexpectedly.
   DiagnosticLogger.event(this,"RADIO_ACTIVATE","global_media_pause_suppressed");
   radio=true; session.setActive(true);
+  if(emulatorMode()){tuneStatus="";publish();return;}
   if(isRealFyt()){
-   freq=getSharedPreferences("radio_cache",0).getString("freq",""); ps=getSharedPreferences("radio_cache",0).getString("ps","FM radio"); rt=getSharedPreferences("radio_cache",0).getString("rt","Waiting for live RDS"); if(syu==null || !syu.connected() || !syu.activate()){
+   freq=getSharedPreferences("radio_cache",0).getString("freq",""); ps=getSharedPreferences("radio_cache",0).getString("ps","FM radio"); rt=getSharedPreferences("radio_cache",0).getString("rt","Waiting for live RDS"); rdsGate.tuned(freq); if(syu==null || !syu.connected() || !syu.activate()){
     Log.w("SYU_RADIO","DIRECT activation unavailable; will retry after service binding, then use OEM fallback");
     mainHandler.postDelayed(()->{if(!radio)return;if(syu!=null&&syu.connected()&&syu.activate()){
       Log.i("SYU_RADIO","DIRECT activation succeeded after delayed binding");
@@ -132,9 +141,9 @@ public class NativeRadioService extends Service implements SyuRadioClient.Listen
   Intent st=new Intent(ACTION_STATE).setPackage(getPackageName());st.putExtra("freq",freq);st.putExtra("ps",ps);st.putExtra("rt",rt);st.putExtra("tune_status",tuneStatus);sendBroadcast(st); NotificationManager nm=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);if(nm!=null)nm.notify(61,note(ps+" • "+freq));
  }
  @Override public void onRadio(String f,String p,String r){Log.i("SYU_RADIO","onRadio freq="+f+" ps="+p+" rt="+r);DiagnosticLogger.event(this,"TUNER_CALLBACK","frequency="+f+" ps="+p+" rt="+r);if(f!=null&&!f.trim().isEmpty()){liveFrequencyReceived=true;Log.i("ASURE_QA","LIVE_FREQUENCY_CALLBACK value="+f);}
-  if(f!=null&&!f.trim().isEmpty()&&!f.equals(freq)){freq=f;ps="FM radio";rt="Waiting for RadioText on "+f;Log.i("ASURE_QA","FREQUENCY_CHANGED "+f);}if(p!=null&&!p.trim().isEmpty())ps=p;if(r!=null&&!r.trim().isEmpty())rt=r;getSharedPreferences("radio_cache",0).edit().putString("freq",freq).putString("ps",ps).putString("rt",rt).apply();DiagnosticLogger.event(this,"RDS_UPDATE","freq="+freq+" ps="+ps+" rt="+rt);if(radio)publish();}
+  if(f!=null&&!f.trim().isEmpty()&&!f.equals(freq)){freq=f;rdsGate.tuned(f);ps=rdsGate.ps();rt=rdsGate.rt();Log.i("ASURE_QA","FREQUENCY_CHANGED "+f);}if(p!=null)rdsGate.acceptPs(p,"syu-callback");if(r!=null)rdsGate.acceptRt(r,"syu-callback");ps=rdsGate.ps();rt=rdsGate.rt();getSharedPreferences("radio_cache",0).edit().putString("freq",freq).putString("ps",ps).putString("rt",rt).apply();DiagnosticLogger.event(this,"RDS_UPDATE","freq="+freq+" ps="+ps+" rt="+rt);if(radio)publish();}
  private Notification note(String txt){PendingIntent pi=PendingIntent.getActivity(this,0,new Intent(this,RadioActivity.class),PendingIntent.FLAG_UPDATE_CURRENT|(Build.VERSION.SDK_INT>=23?PendingIntent.FLAG_IMMUTABLE:0));Notification.Builder b=new Notification.Builder(this,Build.VERSION.SDK_INT>=26?"radio_bridge":"").setSmallIcon(android.R.drawable.ic_media_play).setContentTitle("FYT Radio").setContentText(txt).setContentIntent(pi).setOngoing(true);if(Build.VERSION.SDK_INT>=21)b.setStyle(new Notification.MediaStyle().setMediaSession(session==null?null:session.getSessionToken()).setShowActionsInCompactView(0,1,2)).addAction(android.R.drawable.ic_media_previous,"Previous",mediaPI(KeyEvent.KEYCODE_MEDIA_PREVIOUS,1)).addAction(android.R.drawable.ic_media_pause,"Pause",mediaPI(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,2)).addAction(android.R.drawable.ic_media_next,"Next",mediaPI(KeyEvent.KEYCODE_MEDIA_NEXT,3));return b.build();}
  private PendingIntent mediaPI(int key,int req){Intent i=new Intent(Intent.ACTION_MEDIA_BUTTON);i.setPackage(getPackageName());i.putExtra(Intent.EXTRA_KEY_EVENT,new KeyEvent(KeyEvent.ACTION_DOWN,key));return PendingIntent.getBroadcast(this,req,i,PendingIntent.FLAG_UPDATE_CURRENT|(Build.VERSION.SDK_INT>=23?PendingIntent.FLAG_IMMUTABLE:0));}
  private void ensureChannel(){if(Build.VERSION.SDK_INT>=26){NotificationManager n=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);n.createNotificationChannel(new NotificationChannel("radio_bridge","FYT Radio",NotificationManager.IMPORTANCE_LOW));}}
- @Override public IBinder onBind(Intent i){return null;} @Override public void onDestroy(){DiagnosticLogger.event(this,"SERVICE_DESTROY","radio="+radio);mainHandler.removeCallbacks(diagnosticTick);mainHandler.removeCallbacks(rdsTick);rdsExecutor.shutdownNow();if(diagnosticReceiver!=null)unregisterReceiver(diagnosticReceiver);if(syu!=null)syu.stop();if(session!=null){session.setActive(false);session.release();}super.onDestroy();}
+ @Override public IBinder onBind(Intent i){return null;} @Override public void onDestroy(){DiagnosticLogger.event(this,"SERVICE_DESTROY","radio="+radio);mainHandler.removeCallbacks(diagnosticTick);mainHandler.removeCallbacks(rdsTick);rdsExecutor.shutdownNow();if(diagnosticReceiver!=null)unregisterReceiver(diagnosticReceiver);if(syu!=null)syu.stop();if(emulatorBackend!=null)emulatorBackend.stop();if(session!=null){session.setActive(false);session.release();}super.onDestroy();}
 }

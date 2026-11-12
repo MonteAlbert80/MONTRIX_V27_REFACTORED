@@ -68,8 +68,8 @@ public final class SyuRadioClient {
  public boolean tuneFrequencyKhz(int khz){
   if(khz<87500||khz>108000||khz%200!=100){Log.w(TAG,"DIRECT_TUNE invalid khz="+khz);return false;}
   int units10khz=khz/10;
-  Log.i(TAG,"DIRECT_TUNE request khz="+khz+" units10khz="+units10khz+" command=4");
-  return cmd(radio,4,new int[]{units10khz});
+  Log.i(TAG,"DIRECT_TUNE request khz="+khz+" units10khz="+units10khz+" command=13 args=[3,freq]");
+  return cmd(radio,13,new int[]{3,units10khz});
  }
  public boolean connected(){return radio!=null&&main!=null;}
 }
