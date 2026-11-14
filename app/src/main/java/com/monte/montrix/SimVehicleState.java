@@ -28,7 +28,7 @@ public final class SimVehicleState {
    case "door":door=safe(i.getStringExtra("text"));break;
    case "tpms":tpms=safe(i.getStringExtra("text"));break;
    case "battery":battery=safe(i.getStringExtra("text"));break;
-   case "speed":speedMph=clamp(i.getIntExtra("value",speedMph),0,200);if(speedMph==0)gpsMoving=false;break;
+   case "speed":speedMph=clamp(i.getIntExtra("value",speedMph),0,200);break;
    case "fuel":fuelPercent=clamp(i.getIntExtra("value",fuelPercent),0,100);break;
    case "oil_life":oilLifePercent=clamp(i.getIntExtra("value",oilLifePercent),0,100);break;
    case "temperature":temperatureF=clamp(i.getIntExtra("value",temperatureF),-60,150);break;
@@ -51,17 +51,17 @@ public final class SimVehicleState {
      // Heading uses a distance-based anchor rather than adjacent jittery fixes.
      if(Double.isNaN(headingAnchorLat)){headingAnchorLat=lat;headingAnchorLon=lon;}
      double displacement=distance(headingAnchorLat,headingAnchorLon,lat,lon);
-     if(speedMph>=3 && displacement>=MIN_HEADING_DISPLACEMENT_METERS){
+     if(displacement>=MIN_HEADING_DISPLACEMENT_METERS){
        float target=(float)bearing(headingAnchorLat,headingAnchorLon,lat,lon);
        if(!hasHeadingFix){headingDegrees=target;hasHeadingFix=true;}
        else {float delta=((target-headingDegrees+540f)%360f)-180f;
              headingDegrees=((headingDegrees+Math.max(-55f,Math.min(55f,delta))*0.65f)%360f+360f)%360f;}
        headingAnchorLat=lat;headingAnchorLon=lon;
      }
-     gpsMoving=speedMph>=3 && hasHeadingFix;
+     gpsMoving=hasHeadingFix;
      latitude=lat;longitude=lon;
     }break;}
-   case "heading":headingDegrees=((i.getIntExtra("value",0)%360)+360)%360;hasHeadingFix=true;gpsMoving=speedMph>=3;break;
+   case "heading":headingDegrees=((i.getIntExtra("value",0)%360)+360)%360;hasHeadingFix=true;gpsMoving=true;break;
   }
  }
  // Android am broadcast supports --es but not --ed. Parse decimal extras sent as strings.

@@ -120,14 +120,19 @@ public class DashboardActivity extends Activity implements LocationListener {
   }
 
  void startMapLocation(){
-  if(!isRealFyt()){if(offlineMap!=null)offlineMap.showPosition(OfflineTexasMapView.SIM_HOME_LAT,OfflineTexasMapView.SIM_HOME_LON,false);return;}
+  // Emulator GPS is intentionally subscribed as well as custom SIM_EVENT broadcasts.
+  // Keep trip recording restricted to physical FYT hardware.
   try{locationManager=(LocationManager)getSystemService(LOCATION_SERVICE);if(Build.VERSION.SDK_INT<23||checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED){
    try{if(locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER))locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER,1000,0f,this);}catch(Throwable ignored){}
    try{if(locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER))locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER,3000,0f,this);}catch(Throwable ignored){}
   }}catch(Throwable ignored){}
  }
+ // MONTRIX_NAV_V6_SINGLE_SOURCE: ADB route broadcasts own navigation while streaming.
+ long lastSimGpsBroadcastMs=Long.MIN_VALUE/2;
  @Override public void onLocationChanged(Location l){
   if(l==null)return;
+  // Ignore competing emulator GPS callbacks while RoadPack replay is active.
+  if(!isRealFyt() && android.os.SystemClock.elapsedRealtime()-lastSimGpsBroadcastMs<5000L)return;
   updateLiveSpeed(l);
   // Record every actual vehicle fix, regardless of shift-button state.
   // Emulator fixes are never allowed into the real driving journal.
@@ -142,10 +147,28 @@ public class DashboardActivity extends Activity implements LocationListener {
   }
   DiagnosticLogger.event(this,"GPS_FIX","provider="+l.getProvider()+" lat="+l.getLatitude()+" lon="+l.getLongitude()+" accuracy="+(l.hasAccuracy()?l.getAccuracy():-1)+" speedMps="+(l.hasSpeed()?l.getSpeed():-1)+" shift="+liveShift+" miles="+String.format(Locale.US,"%.3f",liveShiftMiles));
   if(offlineMap==null||!OfflineTexasMapView.validTexas(l.getLatitude(),l.getLongitude()))return;
+   if(!isRealFyt()){
+     // MONTRIX_NAV_V4_GPS_BRIDGE: emulator GPS supplies position; simulator events supply road limits.
+     float displacement=lastMapLocation==null?0f:lastMapLocation.distanceTo(l);
+     long dt=lastMapLocation==null?0L:l.getElapsedRealtimeNanos()-lastMapLocation.getElapsedRealtimeNanos();
+     // MONTRIX_NAV_V5_NO_GPS_SPEED: navigation must never write vehicle speed.
+     // Vehicle speed remains owned by the existing CAN-bus path.
+     boolean moving=(displacement>=8f&&dt>0)||simState.gpsMoving;
+     float bearing=l.hasBearing()&&moving?l.getBearing():
+         (moving&&lastMapLocation!=null?lastMapLocation.bearingTo(l):simState.headingDegrees);
+     simState.latitude=l.getLatitude();simState.longitude=l.getLongitude();
+     if(moving){simState.headingDegrees=(bearing+360f)%360f;simState.hasHeadingFix=true;}
+     if(displacement>=8f&&dt>0)simState.gpsMoving=true;
+     // No GPS-derived writes to simState.speedMph.
+     // Do not reset speed when GPS stops or repeats a fix.
+     offlineMap.setHeading(simState.headingDegrees,simState.gpsMoving);
+     refreshSimUi();
+     android.util.Log.i("MONTRIX_EMU_GPS","v4 fix lat="+l.getLatitude()+" lon="+l.getLongitude()+" displacement="+displacement+" bearing="+simState.headingDegrees+" moving="+moving+" speedMph="+simState.speedMph+" limitMph="+simState.speedLimitMph);
+   }
   // Always move the blue live-location dot. Recenter only after meaningful vehicle movement.
   boolean moveCenter=followVehicle&&(lastMapLocation==null||l.distanceTo(lastMapLocation)>=12f);
   offlineMap.showPosition(l.getLatitude(),l.getLongitude(),moveCenter);
-  if(moveCenter)lastMapLocation=new Location(l);
+  if(moveCenter || !isRealFyt())lastMapLocation=new Location(l);
  }
  @Override public void onProviderEnabled(String p){} @Override public void onProviderDisabled(String p){} @Override public void onStatusChanged(String p,int s,Bundle b){}
  TextView mapTool(String s){TextView v=tv(s,21);v.setGravity(Gravity.CENTER);v.setPadding(0,0,0,1);v.setBackground(new InstrumentDrawable(14,false));v.setTextColor(Color.WHITE);return v;}
@@ -163,6 +186,7 @@ public class DashboardActivity extends Activity implements LocationListener {
   simReceiver=new BroadcastReceiver(){@Override public void onReceive(Context c,Intent i){
     if(!"com.monte.cwgradio.SIM_EVENT".equals(i.getAction()))return;
     String event=i.getStringExtra("event");
+    if("gps".equals(event))lastSimGpsBroadcastMs=android.os.SystemClock.elapsedRealtime();
     simState.apply(event,i);
     updateWarningEvents(event,i);
     if("gps".equals(event)||"heading".equals(event)){
