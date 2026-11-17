@@ -9,7 +9,7 @@ public class DashboardActivity extends Activity implements LocationListener {
  LinearLayout root,rail,body,mediaText; TextView clock,date,source,title,detail,pos,dur,mapStatus; ImageView art,family; ProgressBar progress; AudioManager audio; View mapHost; FytEmbeddedActivityHost fytHost; OfflineTexasMapView offlineMap; VehicleTemperatureProvider tempProvider; TextView tempView; TextView simStatus, speedPod, speedLimitSign, warningPod, shiftStartButton, shiftStopButton; SimVehicleState simState=new SimVehicleState(); final java.util.LinkedHashMap<String,String> activeSimWarnings=new java.util.LinkedHashMap<>(); final java.util.HashSet<String> suppressedSimWarnings=new java.util.HashSet<>(); final java.util.ArrayDeque<String> queuedSimWarnings=new java.util.ArrayDeque<>(); AlertDialog simWarningDialog; String displayedSimWarningKey=null; BroadcastReceiver simReceiver; MediaPlayer player; ArrayList<Song> songs=new ArrayList<>(); int song=-1; boolean radio=true; BroadcastReceiver radioRx; Handler h=new Handler(); LocationManager locationManager; boolean followVehicle=true; Location lastMapLocation; boolean guestMode=false; boolean isBtMode=false; boolean shuffle=false; java.util.ArrayList<Long> playHistory=new java.util.ArrayList<>(); int historyCursor=-1; java.security.SecureRandom random=new java.security.SecureRandom(); TextView shuffleButton,seekBackButton,seekForwardButton,musicBackButton,musicPlayButton,musicNextButton; boolean liveShift=false; double liveShiftMiles=0; Location lastShiftFix; long lastMediaLogAt=0; AudioManager.OnAudioFocusChangeListener focusListener=change->{DiagnosticLogger.event(this,"AUDIO_FOCUS_CHANGE","change="+change+" playerPlaying="+(player!=null&&player.isPlaying()));if(change==AudioManager.AUDIOFOCUS_LOSS && player!=null && player.isPlaying())player.pause();};
  static final int BLUE=Color.rgb(40,150,255), PANEL=Color.rgb(7,15,23), PANEL2=Color.rgb(12,23,34);
  static class Song{long id,albumId;String title,artist,path;Song(long i,long a,String t,String ar,String p){id=i;albumId=a;title=t;artist=ar;path=p;}}
- @Override public void onCreate(Bundle b){super.onCreate(b);tripRecorder=new com.monte.montrix.trips.TripRecorder(this);getWindow().setStatusBarColor(Color.BLACK);getWindow().setNavigationBarColor(Color.BLACK);hideSystemBars();audio=(AudioManager)getSystemService(AUDIO_SERVICE);song=getSharedPreferences("music_resume",0).getInt("index",-1);shuffle=getSharedPreferences("music_resume",0).getBoolean("shuffle",false);loadHistory();liveShift=getSharedPreferences("shift_live",0).getBoolean("active",false);liveShiftMiles=Double.longBitsToDouble(getSharedPreferences("shift_live",0).getLong("miles_bits",Double.doubleToLongBits(0)));DiagnosticLogger.event(this,"DASHBOARD_CREATE","radio_saved="+getSharedPreferences("audio_mode",0).getBoolean("radio",false)+" shift="+liveShift);build();scanMusic();registerRadio();restoreAudioMode();installSimulator();tick();startMapLocation();}
+ @Override public void onCreate(Bundle b){super.onCreate(b);tripRecorder=new com.monte.montrix.trips.TripRecorder(this);offlineSpeedLimits=new OfflineSpeedLimitReader(this);getWindow().setStatusBarColor(Color.BLACK);getWindow().setNavigationBarColor(Color.BLACK);hideSystemBars();audio=(AudioManager)getSystemService(AUDIO_SERVICE);song=getSharedPreferences("music_resume",0).getInt("index",-1);shuffle=getSharedPreferences("music_resume",0).getBoolean("shuffle",false);loadHistory();liveShift=getSharedPreferences("shift_live",0).getBoolean("active",false);liveShiftMiles=Double.longBitsToDouble(getSharedPreferences("shift_live",0).getLong("miles_bits",Double.doubleToLongBits(0)));DiagnosticLogger.event(this,"DASHBOARD_CREATE","radio_saved="+getSharedPreferences("audio_mode",0).getBoolean("radio",false)+" shift="+liveShift);build();scanMusic();registerRadio();restoreAudioMode();installSimulator();tick();startMapLocation();}
  GradientDrawable bg(int color,float r,int stroke){GradientDrawable g=new GradientDrawable();g.setColor(color);g.setCornerRadius(r);if(stroke>0)g.setStroke(stroke,BLUE);return g;}
  TextView tv(String s,int sp){TextView v=new TextView(this);v.setText(s);v.setTextColor(Color.WHITE);v.setTextSize(sp);v.setGravity(Gravity.CENTER_VERTICAL);return v;}
  TextView chip(String s){TextView v=tv(s,13);v.setGravity(Gravity.CENTER);v.setPadding(10,5,10,5);v.setBackground(bg(Color.rgb(10,34,54),15,1));return v;}
@@ -87,35 +87,26 @@ public class DashboardActivity extends Activity implements LocationListener {
   }catch(Throwable e){Toast.makeText(this,"GPS unavailable",Toast.LENGTH_SHORT).show();}
  }
   // Live speed comes from Android GPS, not CAN or the emulator.
-  private Location previousSpeedFix;
-  private long previousSpeedElapsedNanos;
-  private int lastDisplayedSpeedMph = -1;
+  // CAN is the sole authority for displayed vehicle speed. GPS is position only.
+  private void updateLiveSpeed(Location fix) { /* Intentionally no GPS speed writes. */ }
 
-  private void updateLiveSpeed(Location fix) {
-   if (fix == null || !isRealFyt() || speedPod == null) return;
-   if (fix.hasAccuracy() && fix.getAccuracy() > 60f) return;
-   float metersPerSecond = -1f;
-   if (fix.hasSpeed() && fix.getSpeed() >= 0f && !Float.isNaN(fix.getSpeed())) {
-    metersPerSecond = fix.getSpeed();
-   } else if (previousSpeedFix != null) {
-    long dt = fix.getElapsedRealtimeNanos() - previousSpeedElapsedNanos;
-    if (dt >= 500000000L && dt <= 15000000000L) {
-     float meters = previousSpeedFix.distanceTo(fix);
-     if (meters >= 3f) metersPerSecond = meters / (dt / 1000000000f);
-     else metersPerSecond = 0f;
-    }
-   }
-   previousSpeedFix = new Location(fix);
-   previousSpeedElapsedNanos = fix.getElapsedRealtimeNanos();
-   if (metersPerSecond < 0f || metersPerSecond > 80f) return;
-   final int mph = Math.round(metersPerSecond * 2.2369363f);
-   if (mph == lastDisplayedSpeedMph) return;
-   lastDisplayedSpeedMph = mph;
-   runOnUiThread(() -> {
-    if (speedPod != null) {
-     speedPod.setText(String.valueOf(mph));
-     speedPod.setTextColor(0xff52db89);
-    }
+  private OfflineSpeedLimitReader offlineSpeedLimits;
+  private final java.util.concurrent.ExecutorService speedLimitWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
+  private volatile long speedLimitSequence = 0L;
+  private void lookupOfflineLimit(double latitude,double longitude,float accuracy) { lookupOfflineLimit(latitude,longitude,accuracy,android.os.SystemClock.elapsedRealtime()); }
+  private void lookupOfflineLimit(double latitude,double longitude,float accuracy,long fixTimeMs) {
+   if(offlineSpeedLimits==null)return;
+   final long sequence=++speedLimitSequence;
+   speedLimitWorker.execute(()->{
+    OfflineSpeedLimitReader.Result result=offlineSpeedLimits.lookup(latitude,longitude,accuracy,fixTimeMs);
+    runOnUiThread(()->{
+     if(sequence!=speedLimitSequence || isFinishing())return;
+     simState.speedLimitMph=result.mph;
+     if(speedLimitSign!=null){speedLimitSign.setText(result.mph>0?String.valueOf(result.mph):"--");
+      speedLimitSign.setContentDescription(result.mph>0?"Offline speed limit "+result.mph+" mph":"Speed limit unavailable");}
+     android.util.Log.i("MONTRIX_ROADPACK","source=SQLITE result="+result.reason+" mph="+result.mph+" road="+result.road);
+     if(!isRealFyt())refreshSimUi();
+    });
    });
   }
 
@@ -134,6 +125,7 @@ public class DashboardActivity extends Activity implements LocationListener {
   // Ignore competing emulator GPS callbacks while RoadPack replay is active.
   if(!isRealFyt() && android.os.SystemClock.elapsedRealtime()-lastSimGpsBroadcastMs<5000L)return;
   updateLiveSpeed(l);
+  lookupOfflineLimit(l.getLatitude(),l.getLongitude(),l.hasAccuracy()?l.getAccuracy():-1f,l.getElapsedRealtimeNanos()/1000000L);
   // Record every actual vehicle fix, regardless of shift-button state.
   // Emulator fixes are never allowed into the real driving journal.
   if(isRealFyt() && tripRecorder!=null) {
@@ -187,7 +179,9 @@ public class DashboardActivity extends Activity implements LocationListener {
     if(!"com.monte.cwgradio.SIM_EVENT".equals(i.getAction()))return;
     String event=i.getStringExtra("event");
     if("gps".equals(event))lastSimGpsBroadcastMs=android.os.SystemClock.elapsedRealtime();
+    if("speed_limit".equals(event))return; // SQLite is the only speed-limit source.
     simState.apply(event,i);
+    if("gps".equals(event))lookupOfflineLimit(simState.latitude,simState.longitude,10f);
     updateWarningEvents(event,i);
     if("gps".equals(event)||"heading".equals(event)){
       if(offlineMap!=null){offlineMap.showPosition(simState.latitude,simState.longitude,followVehicle);offlineMap.setHeading(simState.headingDegrees,simState.gpsMoving);}
@@ -457,5 +451,5 @@ public class DashboardActivity extends Activity implements LocationListener {
  @Override protected void onStop(){DiagnosticLogger.snapshot(this,"dashboard_stop");DiagnosticLogger.event(this,"MUSIC_LIFECYCLE","stop "+playerState());super.onStop();}
 
  @Override public void onBackPressed(){moveTaskToBack(true);}
- @Override protected void onDestroy(){DiagnosticLogger.snapshot(this,"dashboard_destroy");DiagnosticLogger.event(this,"MUSIC_LIFECYCLE","destroy "+playerState());try{if(locationManager!=null)locationManager.removeUpdates(this);}catch(Throwable ignored){}if(fytHost!=null)fytHost.release();if(offlineMap!=null)offlineMap.destroy();if(tempProvider!=null)tempProvider.stop();h.removeCallbacksAndMessages(null);try{if(radioRx!=null)unregisterReceiver(radioRx);}catch(Throwable ignored){}try{if(simReceiver!=null)unregisterReceiver(simReceiver);}catch(Throwable ignored){}if(player!=null)player.release();if(tripRecorder!=null)tripRecorder.close();if(audio!=null)audio.abandonAudioFocus(focusListener);super.onDestroy();}
+ @Override protected void onDestroy(){DiagnosticLogger.snapshot(this,"dashboard_destroy");DiagnosticLogger.event(this,"MUSIC_LIFECYCLE","destroy "+playerState());try{if(locationManager!=null)locationManager.removeUpdates(this);}catch(Throwable ignored){}if(fytHost!=null)fytHost.release();if(offlineMap!=null)offlineMap.destroy();if(tempProvider!=null)tempProvider.stop();h.removeCallbacksAndMessages(null);try{if(radioRx!=null)unregisterReceiver(radioRx);}catch(Throwable ignored){}try{if(simReceiver!=null)unregisterReceiver(simReceiver);}catch(Throwable ignored){}if(player!=null)player.release();speedLimitWorker.shutdownNow();if(offlineSpeedLimits!=null)offlineSpeedLimits.close();if(tripRecorder!=null)tripRecorder.close();if(audio!=null)audio.abandonAudioFocus(focusListener);super.onDestroy();}
 }
